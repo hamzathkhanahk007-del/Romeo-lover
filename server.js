@@ -1,0 +1,28 @@
+const express=require("express"),http=require("http"),cors=require("cors"),multer=require("multer"),fs=require("fs"),os=require("os"),path=require("path"),{randomBytes}=require("crypto"),{spawn}=require("child_process");
+const app=express(),server=http.createServer(app),PORT=Number(process.env.PORT||3000);
+const origins=(process.env.ALLOWED_ORIGINS||"*").split(",").map(x=>x.trim()).filter(Boolean);
+const originOK=(origin,cb)=>cb(null,!origin||origins.includes("*")||origins.includes(origin));
+app.use(cors({origin:originOK,methods:["GET","POST"]}));app.use(express.json({limit:"32kb"}));
+const io=require("socket.io")(server,{cors:{origin:origins.includes("*")?"*":origins,methods:["GET","POST"]}});
+const rooms=new Map(),converted=new Map();const makeCode=()=>randomBytes(4).toString("hex").slice(0,6).toUpperCase();
+const nameSafe=s=>String(s||"Guest").replace(/[<>]/g,"").trim().slice(0,32)||"Guest";
+function getRoom(id){if(!rooms.has(id)){if(rooms.size>500)throw Error("Room limit reached");rooms.set(id,{id,host:null,people:new Map(),media:null,playback:{playing:false,time:0}})}return rooms.get(id)}
+function people(r){return [...r.people.values()].map(p=>({id:p.id,name:p.name,isHost:p.id===r.host}))}
+function broadcast(r){io.to(r.id).emit("room:participants",people(r))}
+io.on("connection",s=>{s.data.room=null;s.data.name="Guest";
+function leave(){let id=s.data.room;if(!id)return;let r=rooms.get(id);s.leave(id);s.data.room=null;if(!r)return;r.people.delete(s.id);if(r.host===s.id)r.host=r.people.keys().next().value||null;if(!r.people.size)rooms.delete(id);else broadcast(r)}
+s.on("room:create",({name}={})=>{leave();let id;do{id=makeCode()}while(rooms.has(id));let r=getRoom(id);r.host=s.id;r.people.set(s.id,{id:s.id,name:nameSafe(name)});s.data.room=id;s.data.name=nameSafe(name);s.join(id);s.emit("room:joined",{room:id,isHost:true,participants:people(r),media:r.media?{...r.media,...r.playback}:null});broadcast(r)});
+s.on("room:join",({room,name}={})=>{leave();let id=String(room||"").trim().toUpperCase();if(!/^[A-F0-9]{6}$/.test(id))return s.emit("room:error",{message:"Invalid room code."});let r=getRoom(id);r.people.set(s.id,{id:s.id,name:nameSafe(name)});s.data.room=id;s.data.name=nameSafe(name);s.join(id);s.emit("room:joined",{room:id,isHost:r.host===s.id,participants:people(r),media:r.media?{...r.media,...r.playback}:null});broadcast(r)});
+s.on("room:leave",leave);
+s.on("chat:send",({room,text}={})=>{let id=s.data.room;if(!id||id!==room)return;let t=String(text||"").trim().slice(0,500);if(t)io.to(id).emit("chat:message",{name:s.data.name,text:t,at:Date.now()})});
+s.on("media:load",({room,url,type}={})=>{let id=s.data.room,r=rooms.get(id);if(!r||id!==room||r.host!==s.id)return;try{let u=new URL(url);if(!["http:","https:"].includes(u.protocol))return;r.media={url:u.href,type:String(type||"direct")};r.playback={playing:false,time:0};io.to(id).emit("media:load",r.media)}catch{}});
+s.on("playback:state",p=>{let id=s.data.room,r=rooms.get(id);if(!r||!p||r.host!==s.id)return;r.playback={playing:!!p.playing,time:Math.max(0,Math.min(Number(p.time)||0,604800))};io.to(id).emit("playback:state",r.playback)});
+s.on("playback:request",({room}={})=>{let id=s.data.room,r=rooms.get(id);if(r&&id===room)s.emit("playback:state",r.playback)});
+s.on("disconnect",leave)});
+app.get("/api/health",(_,res)=>res.json({ok:true,rooms:rooms.size,conversion:process.env.ENABLE_CONVERSION==="true"}));
+const temp=path.join(os.tmpdir(),"ravelite");fs.mkdirSync(temp,{recursive:true});
+app.get("/api/converted/:token",(req,res)=>{let f=converted.get(req.params.token);if(!f||!fs.existsSync(f))return res.status(404).send("Converted file expired.");res.type("mp4");res.sendFile(f)});
+const upload=multer({dest:temp,limits:{fileSize:500*1024*1024,files:1},fileFilter:(_,f,cb)=>cb(null,/^video\//i.test(f.mimetype)||/\.(mkv|avi|mov|webm|flv|mp4|mpeg|mpg|ts)$/i.test(f.originalname))});
+app.post("/api/convert",upload.single("video"),(req,res)=>{if(process.env.ENABLE_CONVERSION!=="true"){if(req.file)fs.unlink(req.file.path,()=>{});return res.status(503).json({error:"Conversion disabled. Install FFmpeg and set ENABLE_CONVERSION=true."})}if(!req.file)return res.status(400).json({error:"Choose a supported video file."});let input=req.file.path,output=input+".mp4";const ff=spawn(process.env.FFMPEG_PATH||"ffmpeg",["-y","-i",input,"-c:v","libx264","-preset","veryfast","-crf","23","-c:a","aac","-b:a","128k","-movflags","+faststart",output]);let err="";ff.stderr.on("data",d=>err=(err+d.toString()).slice(-2000));ff.on("error",e=>{fs.unlink(input,()=>{});res.status(500).json({error:"FFmpeg unavailable: "+e.message})});ff.on("close",code=>{fs.unlink(input,()=>{});if(code!==0){fs.unlink(output,()=>{});return res.status(422).json({error:"Conversion failed; file may be damaged or unsupported.",details:err.slice(-400)})}let token=randomBytes(12).toString("hex");converted.set(token,output);setTimeout(()=>{let f=converted.get(token);if(f){converted.delete(token);fs.unlink(f,()=>{})}},30*60*1000);const publicURL=(process.env.PUBLIC_URL||"").replace(/\/+$/,"");if(!publicURL){converted.delete(token);fs.unlink(output,()=>{});return res.status(500).json({error:"Set PUBLIC_URL to the backend's HTTPS URL."})}res.json({url:publicURL+"/api/converted/"+token})})});
+app.use((err,req,res,next)=>{if(err instanceof multer.MulterError)return res.status(413).json({error:"Upload too large (500 MB limit)."});console.error(err);res.status(500).json({error:"Unexpected server error."})});
+server.listen(PORT,"0.0.0.0",()=>console.log("RaveLite backend listening on "+PORT));
