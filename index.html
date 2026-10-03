@@ -60,8 +60,115 @@ function join(code){code=String(code||'').toUpperCase().replace(/[^A-Z0-9]/g,'')
 function leave(){state.room=null;updateRoomUI();history.replaceState({},'',location.pathname);system('You left the room.')}
 function invite(){if(!state.room)return;const url=new URL(location.href);url.searchParams.set('room',state.room.code);const text=url.href;if(navigator.clipboard&&navigator.clipboard.writeText){navigator.clipboard.writeText(text).then(()=>$('roomStatus').textContent='Invite URL copied. Recipients still need a backend for shared realtime rooms.').catch(()=>prompt('Copy invite URL:',text))}else prompt('Copy invite URL:',text)}
 function validHttpUrl(value){try{const u=new URL(value);return ['http:','https:'].includes(u.protocol)?u:null}catch{return null}}
-function loadMedia(url){const parsed=validHttpUrl(url);if(!parsed){alert('Enter a valid http:// or https:// media URL.');return}const area=$('playerArea');area.replaceChildren();const video=document.createElement('video');video.controls=true;video.playsInline=true;video.preload='metadata';video.crossOrigin='anonymous';video.src=parsed.href;video.addEventListener('error',()=>{$('roomStatus').textContent='Media could not be played. Check URL, CORS, codec, MIME type, and access permissions.'});video.addEventListener('loadedmetadata',()=>{$('roomStatus').textContent='Media loaded locally. Playback is not synchronized with other devices.';refreshAudioTracks(video)});video.addEventListener('play',()=>{state.media={url:parsed.href,playing:true,time:video.currentTime}});video.addEventListener('pause',()=>{if(state.media)state.media={...state.media,playing:false,time:video.currentTime}});video.addEventListener('timeupdate',()=>{if(state.media)state.media.time=video.currentTime});area.append(video);const status=document.createElement('div');status.className='player-status';status.textContent='LOCAL PLAYBACK';area.append(status);state.media={url:parsed.href,playing:false,time:0};state.history.unshift(parsed.href);state.history=state.history.slice(0,8);$('mediaHistory').replaceChildren();state.history.forEach(u=>{const d=document.createElement('div');d.className='queue-item';d.textContent=u;$('mediaHistory').append(d)});$('roomStatus').textContent='Media loading…';}
-function currentVideo(){return $('playerArea').querySelector('video')}
+
+function loadMedia(url, kind, announce = true) {
+  url = (url || '').trim();
+  if (!url) return toast('Paste a video link first');
+
+  try {
+    new URL(url);
+  } catch (e) {
+    return toast('Please enter a valid URL including https://');
+  }
+
+  kind = detectKind(url, kind || 'auto');
+  currentUrl = url;
+  $('sourceInput').value = url;
+  clearScreen();
+  $('mediaNotice').textContent = 'Loading media…';
+
+  if (kind === 'youtube') {
+    const y = ytInfo(url);
+    if (!y.video && !y.list) {
+      $('mediaNotice').textContent =
+        'Could not identify a YouTube video or playlist.';
+      return;
+    }
+
+    const iframe = document.createElement('iframe');
+    iframe.allow = 'autoplay; encrypted-media; picture-in-picture; fullscreen';
+    iframe.allowFullscreen = true;
+    iframe.title = 'YouTube video player';
+
+    const query = new URLSearchParams();
+    if (y.list) query.set('list', y.list);
+    query.set('enablejsapi', '1');
+    query.set('origin', location.origin);
+
+    iframe.src =
+      'https://www.youtube-nocookie.com/embed/' +
+      (y.video || '') + '?' + query.toString();
+
+    $('screen').appendChild(iframe);
+    player = iframe;
+    playerKind = 'youtube';
+    $('mediaNotice').textContent =
+      'YouTube embedded player. Some videos do not allow embedding.';
+    loadYouTubeApi();
+
+  } else if (
+    kind === 'drive' ||
+    /drive\.google\.com/i.test(url)
+  ) {
+    const id = driveId(url);
+
+    if (!id) {
+      $('mediaNotice').textContent =
+        'Could not find a Google Drive file ID.';
+      return;
+    }
+
+    const iframe = document.createElement('iframe');
+    iframe.src =
+      'https://drive.google.com/file/d/' +
+      encodeURIComponent(id) + '/preview';
+    iframe.title = 'Google Drive video player';
+    iframe.allow =
+      'autoplay; fullscreen; encrypted-media; picture-in-picture';
+    iframe.allowFullscreen = true;
+    iframe.referrerPolicy = 'strict-origin-when-cross-origin';
+
+    $('screen').appendChild(iframe);
+    player = iframe;
+    playerKind = 'drive';
+
+    $('mediaNotice').textContent =
+      'Google Drive preview loaded. Sign-in, sharing permissions, ' +
+      'or embedding restrictions may prevent playback. ' +
+      'Drive playback is not synchronized by RaveLite.';
+
+  } else {
+    const v = document.createElement('video');
+    v.controls = true;
+    v.playsInline = true;
+    v.preload = 'metadata';
+    v.src = url;
+
+    v.addEventListener('loadedmetadata', () => {
+      $('duration').textContent = formatTime(v.duration);
+      durationValue = v.duration || 0;
+      $('mediaNotice').textContent = 'Media ready.';
+    });
+
+    v.addEventListener('error', () => {
+      $('mediaNotice').textContent =
+        'This URL could not be played. Try a direct MP4 or WebM URL.';
+    });
+
+    $('screen').appendChild(v);
+    player = v;
+    playerKind = 'video';
+  }
+
+  if (announce) {
+    sendHost({ type: 'load', url, kind, byHost: true });
+    if (isHost) {
+      broadcast({ type: 'load', url, kind, byHost: true });
+    }
+  }
+
+  if (isHost) history.replaceState({}, '', roomUrl());
+}function currentVideo(){return $('playerArea').querySelector('video')}
 function refreshAudioTracks(v){const select=$('audioTrack');select.replaceChildren(new Option('Browser-selected audio track',''));try{const tracks=v.audioTracks;if(tracks&&tracks.length){for(let i=0;i<tracks.length;i++)select.add(new Option(tracks[i].label||'Audio '+(i+1),String(i)));select.onchange=()=>{for(let i=0;i<tracks.length;i++)tracks[i].enabled=String(i)===select.value}}else{select.add(new Option('No selectable audio tracks exposed by browser',''));select.disabled=true}}catch{select.disabled=true}}
 function send(text,kind='message'){if(!state.room){system('Create or join a room before chatting.');return}text=String(text||'').trim().slice(0,1000);if(!text)return;addMessage(safeName($('displayName').value),text,kind);state.messages.push({room:state.room.code,name:safeName($('displayName').value),text,at:Date.now(),kind});$('typingStatus').textContent='';}
 $('createRoom').onclick=create;$('joinRoom').onclick=()=>join($('joinCode').value);$('leaveRoom').onclick=leave;$('copyInvite').onclick=invite;
