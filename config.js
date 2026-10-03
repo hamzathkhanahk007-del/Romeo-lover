@@ -1,0 +1,1 @@
+/* Set serverUrl to your deployed backend HTTPS URL. Never put secrets here. */ window.RAVELITE_CONFIG={serverUrl:""};
