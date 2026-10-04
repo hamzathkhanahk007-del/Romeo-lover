@@ -1,1 +1,162 @@
-<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="theme-color" content="#10131c"><title>RaveLite Universal Watch Party</title><link rel="stylesheet" href="style.css"><script src="config.js"></script><script src="https://cdn.jsdelivr.net/npm/hls.js@1"></script><script src="https://cdn.dashjs.org/latest/dash.all.min.js"></script><script src="https://www.youtube.com/iframe_api"></script><script src="https://cdn.socket.io/4.8.1/socket.io.min.js"></script></head><body><header><div class="brand">▶ RaveLite <small>UNIVERSAL WATCH PARTY</small></div><span id="connection">Backend not configured</span></header><main><section><article><small>WATCH TOGETHER</small><h1>Bring your video.<br><em>Meet in the same moment.</em></h1><p>Paste a link. Playback depends on the source, browser, codecs, CORS and access permissions.</p><label>Video or stream URL<input id="mediaUrl" placeholder="https://… (.mp4, .m3u8, .mpd, YouTube, Drive)"></label><div class="buttons"><button id="loadBtn">Load media</button><button id="openBtn">Open source</button></div><div id="status" class="status">Ready.</div><div id="playerArea" class="player"><div class="placeholder">Your player appears here</div></div><div class="buttons"><button id="playBtn">▶ Play</button><button id="pauseBtn">Ⅱ Pause</button><button id="syncBtn">Sync to host</button><button id="pipBtn">Picture-in-picture</button></div><p class="muted">Drive preview cannot be reliably synchronized. Some sites block embedding. Never share private or expiring URLs in public rooms.</p></article><article><h2>Room controls</h2><label>Display name<input id="displayName" value="Guest" maxlength="32"></label><label>Room code<input id="roomCode" placeholder="ABC123" maxlength="12"></label><div class="buttons"><button id="createBtn">Create room</button><button id="joinBtn">Join room</button><button id="leaveBtn">Leave</button><button id="copyBtn">Copy invite</button></div><div id="roomStatus" class="status">Backend required for cross-device rooms.</div><h3>Participants</h3><div id="participants" class="muted">None</div></article><article><h2>Convert a video file</h2><p class="muted">Optional backend + FFmpeg required. Conversion is disabled by default.</p><input id="uploadFile" type="file" accept="video/*,.mkv,.avi,.mov,.webm,.flv"><button id="convertBtn">Upload & convert</button><div id="convertStatus" class="status">Choose a file.</div></article></section><aside><article><h2>Room chat</h2><div id="chatLog" class="chatlog">Join a room to chat.</div><input id="chatInput" placeholder="Message" maxlength="500"><button id="sendBtn">Send</button></article><article><h2>Recent links</h2><div id="history" class="history">No links yet.</div><button id="clearHistory">Clear history</button></article><article><h2>Source support</h2><ul><li>Direct media — browser codec and headers required</li><li>HLS (.m3u8) — hls.js/native + CORS</li><li>DASH (.mpd) — dash.js + CORS</li><li>YouTube — official embed, if allowed</li><li>Drive — preview only, processing/access required</li><li>Other sites — only if they expose an embeddable player or media URL</li></ul></article></aside></main><footer>GitHub Pages hosts the interface only. A backend is needed for live rooms and FFmpeg conversion. This project does not bypass DRM, paywalls or access restrictions.</footer><script src="app.js"></script></body></html>
+
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#10131c">
+  <title>RaveLite Universal Watch Party</title>
+
+  <link rel="stylesheet" href="style.css">
+
+  <!-- Backend configuration must load first -->
+  <script src="config.js"></script>
+
+  <!-- Media libraries -->
+  <script src="https://cdn.jsdelivr.net/npm/hls.js@1"></script>
+  <script src="https://cdn.dashjs.org/latest/dash.all.min.js"></script>
+  <script src="https://www.youtube.com/iframe_api"></script>
+
+  <!-- Socket.IO for live rooms -->
+  <script src="https://cdn.socket.io/4.8.1/socket.io.min.js"></script>
+</head>
+
+<body>
+  <header>
+    <div class="brand">
+      ▶ RaveLite
+      <small>UNIVERSAL WATCH PARTY</small>
+    </div>
+    <span id="connection">Checking backend...</span>
+  </header>
+
+  <main>
+    <section>
+      <article>
+        <small>WATCH TOGETHER</small>
+        <h1>
+          Bring your video.<br>
+          <em>Meet in the same moment.</em>
+        </h1>
+
+        <p>
+          Paste a link. Playback depends on the source, browser,
+          codecs, CORS and access permissions.
+        </p>
+
+        <label>
+          Video or stream URL
+          <input
+            id="mediaUrl"
+            type="url"
+            placeholder="https://… (.mp4, .m3u8, .mpd, YouTube, Drive)"
+          >
+        </label>
+
+        <div class="buttons">
+          <button id="loadBtn">Load media</button>
+          <button id="openBtn">Open source</button>
+        </div>
+
+        <div id="status" class="status">Ready.</div>
+
+        <div id="playerArea" class="player">
+          <div class="placeholder">Your player appears here</div>
+        </div>
+
+        <div class="buttons">
+          <button id="playBtn">▶ Play</button>
+          <button id="pauseBtn">Ⅱ Pause</button>
+          <button id="syncBtn">Sync to host</button>
+          <button id="pipBtn">Picture-in-picture</button>
+        </div>
+
+        <p class="muted">
+          Drive preview cannot be reliably synchronized. Some sites
+          block embedding. Never share private or expiring URLs in public rooms.
+        </p>
+      </article>
+
+      <article>
+        <h2>Room controls</h2>
+
+        <label>
+          Display name
+          <input id="displayName" value="Guest" maxlength="32">
+        </label>
+
+        <label>
+          Room code
+          <input id="roomCode" placeholder="ABC123" maxlength="12">
+        </label>
+
+        <div class="buttons">
+          <button id="createBtn">Create room</button>
+          <button id="joinBtn">Join room</button>
+          <button id="leaveBtn">Leave</button>
+          <button id="copyBtn">Copy invite</button>
+        </div>
+
+        <div id="roomStatus" class="status">
+          Backend required for cross-device rooms.
+        </div>
+
+        <h3>Participants</h3>
+        <div id="participants" class="muted">None</div>
+      </article>
+
+      <article>
+        <h2>Convert a video file</h2>
+        <p class="muted">
+          Optional backend + FFmpeg required. Conversion is disabled by default.
+        </p>
+
+        <input
+          id="uploadFile"
+          type="file"
+          accept="video/*,.mkv,.avi,.mov,.webm,.flv"
+        >
+
+        <button id="convertBtn">Upload &amp; convert</button>
+        <div id="convertStatus" class="status">Choose a file.</div>
+      </article>
+    </section>
+
+    <aside>
+      <article>
+        <h2>Room chat</h2>
+        <div id="chatLog" class="chatlog">Join a room to chat.</div>
+        <input id="chatInput" placeholder="Message" maxlength="500">
+        <button id="sendBtn">Send</button>
+      </article>
+
+      <article>
+        <h2>Recent links</h2>
+        <div id="history" class="history">No links yet.</div>
+        <button id="clearHistory">Clear history</button>
+      </article>
+
+      <article>
+        <h2>Source support</h2>
+        <ul>
+          <li>Direct media — browser codec and headers required</li>
+          <li>HLS (.m3u8) — hls.js/native + CORS</li>
+          <li>DASH (.mpd) — dash.js + CORS</li>
+          <li>YouTube — official embed, if allowed</li>
+          <li>Drive — preview only, processing/access required</li>
+          <li>Other sites — only if they expose an embeddable player or media URL</li>
+        </ul>
+      </article>
+    </aside>
+  </main>
+
+  <footer>
+    GitHub Pages hosts the interface only. A backend is needed for live
+    rooms and FFmpeg conversion. This project does not bypass DRM,
+    paywalls or access restrictions.
+  </footer>
+
+  <!-- Load application after the page elements exist -->
+  <script src="app.js"></script>
+</body>
+</html>
