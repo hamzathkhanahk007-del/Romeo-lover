@@ -157,6 +157,15 @@
   </footer>
 
   <!-- Load application after the page elements exist -->
-  <script src="app.js"></script>
+  <script>
+window.addEventListener("error", function (event) {
+  const el = document.getElementById("connection");
+  if (el) {
+    el.textContent = "JavaScript error: " +
+      (event.message || "Check app.js");
+  }
+});
+</script>
+<script src="app.js"></script>
 </body>
 </html>
