@@ -1,454 +1,633 @@
-```javascript
-(() => {
+
+(function () {
   "use strict";
 
-  const $ = id => document.getElementById(id);
-  const cfg = window.RAVELITE_CONFIG || {};
+  var $ = function (id) {
+    return document.getElementById(id);
+  };
 
-  let socket = null;
-  let room = null;
-  let isHost = false;
-  let video = null;
-  let hls = null;
-  let dash = null;
-  let yt = null;
-  let history = [];
-  let currentMediaUrl = "";
-  let currentMediaType = "";
-  let controlsTimer = null;
+  var cfg = window.RAVELITE_CONFIG || {};
+  var socket = null;
+  var room = null;
+  var isHost = false;
+  var video = null;
+  var hls = null;
+  var dash = null;
+  var yt = null;
+  var historyList = [];
 
-  const base = () => String(cfg.serverUrl || "").trim().replace(/\/+$/, "");
-
-  function msg(s) {
-    $("status").textContent = s;
+  function base() {
+    return String(cfg.serverUrl || "").trim().replace(/\/+$/, "");
   }
 
-  function roomMsg(s) {
-    $("roomStatus").textContent = s;
+  function msg(text) {
+    if ($("status")) $("status").textContent = text;
   }
 
-  function url(raw) {
+  function roomMsg(text) {
+    if ($("roomStatus")) $("roomStatus").textContent = text;
+  }
+
+  function connectionMsg(text) {
+    if ($("connection")) $("connection").textContent = text;
+  }
+
+  function validUrl(raw) {
     try {
-      const u = new URL(String(raw || "").trim());
-      return /^https?:$/.test(u.protocol) ? u : null;
-    } catch {
-      return null;
-    }
+      var u = new URL(String(raw || "").trim());
+      if (u.protocol === "http:" || u.protocol === "https:") return u;
+    } catch (e) {}
+    return null;
   }
 
-  function kind(u) {
-    const h = u.hostname.toLowerCase();
+  function mediaKind(u) {
+    var host = u.hostname.toLowerCase();
 
-    if (/(^|\.)youtube\.com$|(^|\.)youtu\.be$/.test(h))
+    if (/(^|\.)youtube\.com$|(^|\.)youtu\.be$/.test(host)) {
       return "youtube";
+    }
 
-    if (h === "drive.google.com" || h === "docs.google.com")
+    if (host === "drive.google.com" || host === "docs.google.com") {
       return "drive";
+    }
 
-    if (/\.m3u8$/i.test(u.pathname))
-      return "hls";
-
-    if (/\.mpd$/i.test(u.pathname))
-      return "dash";
+    if (/\.m3u8$/i.test(u.pathname)) return "hls";
+    if (/\.mpd$/i.test(u.pathname)) return "dash";
 
     return "direct";
   }
 
-  function clean() {
+  function cleanupPlayer() {
     if (hls) {
-      hls.destroy();
+      try { hls.destroy(); } catch (e) {}
       hls = null;
     }
 
     if (dash) {
-      dash.reset();
+      try { dash.reset(); } catch (e) {}
       dash = null;
     }
 
     if (yt) {
-      try {
-        yt.destroy();
-      } catch {}
+      try { yt.destroy(); } catch (e) {}
       yt = null;
     }
 
     video = null;
-    currentMediaUrl = "";
-    currentMediaType = "";
-    clearTimeout(controlsTimer);
 
-    $("playerArea").replaceChildren();
-  }
-
-  function send(ev, data = {}) {
-    if (socket?.connected && room) {
-      socket.emit(ev, { room, ...data });
+    if ($("playerArea")) {
+      $("playerArea").innerHTML = "";
     }
   }
 
-  function hist(u) {
-    history = [u, ...history.filter(x => x !== u)].slice(0, 8);
+  function send(eventName, data) {
+    data = data || {};
 
-    $("history").replaceChildren();
+    if (socket && socket.connected && room) {
+      data.room = room;
+      socket.emit(eventName, data);
+    }
+  }
 
-    history.forEach(x => {
-      const b = document.createElement("button");
-      b.textContent = x;
-      b.onclick = () => load(x);
-      $("history").append(b);
+  function addHistory(url) {
+    historyList = [url].concat(
+      historyList.filter(function (item) {
+        return item !== url;
+      })
+    ).slice(0, 8);
+
+    var container = $("history");
+    if (!container) return;
+
+    container.innerHTML = "";
+
+    historyList.forEach(function (item) {
+      var button = document.createElement("button");
+      button.textContent = item;
+      button.onclick = function () {
+        loadMedia(item);
+      };
+      container.appendChild(button);
     });
   }
 
-  function driveID(u) {
-    return u.pathname.match(/\/file\/d\/([^/]+)/)?.[1] ||
-      u.searchParams.get("id");
+  function driveId(u) {
+    var match = u.pathname.match(/\/file\/d\/([^/]+)/);
+    return (match && match[1]) || u.searchParams.get("id");
   }
 
-  function ytID(u) {
-    return u.hostname.includes("youtu.be")
-      ? u.pathname.split("/").filter(Boolean)[0]
-      : u.searchParams.get("v") ||
-        u.pathname.match(/\/(?:embed|shorts)\/([^/]+)/)?.[1];
+  function youtubeId(u) {
+    if (u.hostname.indexOf("youtu.be") !== -1) {
+      return u.pathname.split("/").filter(Boolean)[0];
+    }
+
+    return u.searchParams.get("v") ||
+      ((u.pathname.match(/\/(?:embed|shorts)\/([^/]+)/) || [])[1]);
   }
 
-  /*
-   * CUSTOM VIDEO PLAYER
-   */
-
-  function createVideoPlayer() {
-    const wrapper = document.createElement("div");
-    wrapper.className = "ravelite-video-wrapper";
-
-    const v = document.createElement("video");
-
-    v.className = "ravelite-video";
-    v.playsInline = true;
-    v.preload = "metadata";
-    v.crossOrigin = "anonymous";
-    v.setAttribute("playsinline", "");
-    v.setAttribute("webkit-playsinline", "");
-
-    /*
-     * Disable browser-native controls.
-     * We use our own bottom control bar.
-     */
-    v.controls = false;
-
-    wrapper.append(v);
-
-    const controls = document.createElement("div");
-    controls.className = "ravelite-controls";
-
-    controls.innerHTML = `
-      <div class="ravelite-progress-row">
-        <input
-          class="ravelite-progress"
-          type="range"
-          min="0"
-          max="100"
-          value="0"
-          step="0.1"
-          aria-label="Video progress"
-        >
-      </div>
-
-      <div class="ravelite-control-row">
-
-        <button
-          type="button"
-          class="ravelite-play"
-          aria-label="Play"
-        >▶</button>
-
-        <span class="ravelite-time">0:00 / 0:00</span>
-
-        <div class="ravelite-spacer"></div>
-
-        <button
-          type="button"
-          class="ravelite-mute"
-          aria-label="Mute"
-        >🔊</button>
-
-        <input
-          class="ravelite-volume"
-          type="range"
-          min="0"
-          max="1"
-          value="1"
-          step="0.05"
-          aria-label="Volume"
-        >
-
-        <button
-          type="button"
-          class="ravelite-fullscreen"
-          aria-label="Fullscreen"
-        >⛶</button>
-
-      </div>
-    `;
-
-    wrapper.append(controls);
-    $("playerArea").append(wrapper);
-
-    const playButton = controls.querySelector(".ravelite-play");
-    const progress = controls.querySelector(".ravelite-progress");
-    const timeLabel = controls.querySelector(".ravelite-time");
-    const muteButton = controls.querySelector(".ravelite-mute");
-    const volume = controls.querySelector(".ravelite-volume");
-    const fullscreen = controls.querySelector(".ravelite-fullscreen");
-
-    function formatTime(seconds) {
-      if (!Number.isFinite(seconds) || seconds < 0)
-        return "0:00";
-
-      const total = Math.floor(seconds);
-      const minutes = Math.floor(total / 60);
-      const secs = total % 60;
-
-      return `${minutes}:${String(secs).padStart(2, "0")}`;
-    }
-
-    function updatePlayButton() {
-      playButton.textContent = v.paused ? "▶" : "⏸";
-      playButton.setAttribute(
-        "aria-label",
-        v.paused ? "Play" : "Pause"
-      );
-    }
-
-    function updateProgress() {
-      if (!Number.isFinite(v.duration) || v.duration <= 0) {
-        progress.value = 0;
-        timeLabel.textContent = `${formatTime(v.currentTime)} / 0:00`;
-        return;
-      }
-
-      progress.value = (v.currentTime / v.duration) * 100;
-
-      timeLabel.textContent =
-        `${formatTime(v.currentTime)} / ${formatTime(v.duration)}`;
-    }
-
-    function updateMuteButton() {
-      if (v.muted || v.volume === 0) {
-        muteButton.textContent = "🔇";
-        muteButton.setAttribute("aria-label", "Unmute");
-      } else {
-        muteButton.textContent = "🔊";
-        muteButton.setAttribute("aria-label", "Mute");
-      }
-    }
-
-    function showControls() {
-      controls.classList.add("visible");
-      clearTimeout(controlsTimer);
-
-      if (!v.paused) {
-        controlsTimer = setTimeout(() => {
-          controls.classList.remove("visible");
-        }, 3000);
-      }
-    }
-
-    function togglePlay() {
-      if (v.paused) {
-        v.play().catch(() => {
-          msg("Tap Play once to allow playback on this device.");
-        });
-      } else {
-        v.pause();
-      }
-    }
-
-    playButton.onclick = e => {
-      e.stopPropagation();
-      togglePlay();
-      showControls();
-    };
-
-    /*
-     * Progress bar seeking
-     */
-    progress.addEventListener("input", () => {
-      if (!Number.isFinite(v.duration)) return;
-
-      const position =
-        (Number(progress.value) / 100) * v.duration;
-
-      v.currentTime = position;
-      updateProgress();
-    });
-
-    /*
-     * Volume
-     */
-    volume.addEventListener("input", () => {
-      v.volume = Math.max(
-        0,
-        Math.min(1, Number(volume.value))
-      );
-
-      v.muted = v.volume === 0;
-      updateMuteButton();
-    });
-
-    muteButton.onclick = e => {
-      e.stopPropagation();
-
-      v.muted = !v.muted;
-
-      if (!v.muted && v.volume === 0) {
-        v.volume = 1;
-        volume.value = "1";
-      }
-
-      updateMuteButton();
-      showControls();
-    };
-
-    /*
-     * Fullscreen
-     */
-    fullscreen.onclick = async e => {
-      e.stopPropagation();
-
-      try {
-        if (document.fullscreenElement) {
-          await document.exitFullscreen();
-          return;
-        }
-
-        if (wrapper.requestFullscreen) {
-          await wrapper.requestFullscreen();
-        } else if (v.webkitEnterFullscreen) {
-          v.webkitEnterFullscreen();
-        } else {
-          msg("Fullscreen is not supported by this browser.");
-        }
-      } catch {
-        try {
-          if (v.webkitEnterFullscreen) {
-            v.webkitEnterFullscreen();
-          } else {
-            msg("Fullscreen unavailable.");
-          }
-        } catch {
-          msg("Fullscreen unavailable.");
-        }
-      }
-
-      showControls();
-    };
-
-    /*
-     * Tap video = play/pause.
-     * This works well on Android.
-     */
-    v.addEventListener("click", () => {
-      togglePlay();
-      showControls();
-    });
-
-    v.addEventListener("touchstart", () => {
-      showControls();
-    }, { passive: true });
-
-    wrapper.addEventListener("mousemove", showControls);
-    wrapper.addEventListener("touchstart", showControls, {
-      passive: true
-    });
-
-    v.addEventListener("play", updatePlayButton);
-    v.addEventListener("pause", updatePlayButton);
-    v.addEventListener("timeupdate", updateProgress);
-    v.addEventListener("loadedmetadata", updateProgress);
-    v.addEventListener("durationchange", updateProgress);
-    v.addEventListener("volumechange", updateMuteButton);
-
-    /*
-     * Synchronization events
-     */
-    v.onplay = () => {
-      updatePlayButton();
-
-      if (!window.__raveliteRemotePlayback) {
-        send("playback:state", {
-          playing: true,
-          time: v.currentTime,
-          url: currentMediaUrl,
-          type: currentMediaType
-        });
-      }
-
-      window.__raveliteRemotePlayback = false;
-    };
-
-    v.onpause = () => {
-      updatePlayButton();
-
-      if (!window.__raveliteRemotePlayback) {
-        send("playback:state", {
-          playing: false,
-          time: v.currentTime,
-          url: currentMediaUrl,
-          type: currentMediaType
-        });
-      }
-
-      window.__raveliteRemotePlayback = false;
-    };
-
-    updatePlayButton();
-    updateMuteButton();
-    updateProgress();
-
-    return v;
-  }
-
-  function load(raw, remote = false) {
-    const u = url(raw);
+  function loadMedia(raw, remote) {
+    var u = validUrl(raw);
 
     if (!u) {
-      msg("Enter a valid HTTP(S) URL.");
+      msg("Enter a valid HTTP or HTTPS media URL.");
       return;
     }
 
-    clean();
+    cleanupPlayer();
 
-    $("mediaUrl").value = u.href;
+    if ($("mediaUrl")) $("mediaUrl").value = u.href;
 
-    const k = kind(u);
+    var kind = mediaKind(u);
+    addHistory(u.href);
 
-    currentMediaUrl = u.href;
-    currentMediaType = k;
-
-    hist(u.href);
-
-    /*
-     * GOOGLE DRIVE
-     */
-    if (k === "drive") {
-      const id = driveID(u);
+    if (kind === "drive") {
+      var id = driveId(u);
 
       if (!id) {
-        msg("Could not identify the Drive file ID.");
+        msg("Could not identify the Google Drive file ID.");
         return;
       }
 
-      const f = document.createElement("iframe");
+      var frame = document.createElement("iframe");
+      frame.src = "https://drive.google.com/file/d/" +
+        encodeURIComponent(id) + "/preview";
+      frame.title = "Google Drive preview";
+      frame.allow = "autoplay; encrypted-media; picture-in-picture; fullscreen";
+      frame.allowFullscreen = true;
 
-      f.src =
-        "https://drive.google.com/file/d/" +
-        encodeURIComponent(id) +
-        "/preview";
+      $("playerArea").appendChild(frame);
 
-      f.allow =
-        "autoplay; encrypted-media; picture-in-picture; fullscreen";
+      msg("Google Drive preview loaded if sharing permissions allow playback.");
 
-      f.allowFullscreen = true;
-      f.title = "Google Drive preview";
+      if (!remote) send("media:load", { url: u.href, type: kind });
+      return;
+    }
+
+    if (kind === "youtube") {
+      var videoId = youtubeId(u);
+
+      if (!videoId) {
+        msg("Could not identify the YouTube video.");
+        return;
+      }
+
+      var target = document.createElement("div");
+      target.id = "ytplayer";
+      $("playerArea").appendChild(target);
+
+      function createYouTubePlayer() {
+        if (!window.YT || !window.YT.Player) {
+          msg("YouTube player API did not load.");
+          return;
+        }
+
+        yt = new window.YT.Player("ytplayer", {
+          width: "100%",
+          height: "100%",
+          videoId: videoId,
+          playerVars: { playsinline: 1, rel: 0 },
+          events: {
+            onReady: function () {
+              msg("YouTube player ready if embedding is permitted.");
+            },
+            onError: function (event) {
+              msg("YouTube playback error: " + event.data);
+            },
+            onStateChange: function (event) {
+              if (!remote && (event.data === 1 || event.data === 2)) {
+                send("playback:state", {
+                  playing: event.data === 1,
+                  time: yt.getCurrentTime(),
+                  url: u.href,
+                  type: kind
+                });
+              }
+            }
+          }
+        });
+      }
+
+      if (window.YT && window.YT.Player) {
+        createYouTubePlayer();
+      } else {
+        window.onYouTubeIframeAPIReady = createYouTubePlayer;
+      }
+
+      msg("Loading YouTube player…");
+
+      if (!remote) send("media:load", { url: u.href, type: kind });
+      return;
+    }
+
+    var player = document.createElement("video");
+    player.controls = true;
+    player.playsInline = true;
+    player.preload = "metadata";
+    player.crossOrigin = "anonymous";
+    video = player;
+
+    $("playerArea").appendChild(player);
+
+    player.onerror = function () {
+      msg("Playback failed. Check the media URL, CORS, format and stream permissions.");
+    };
+
+    player.onloadedmetadata = function () {
+      msg(kind.toUpperCase() + " media loaded.");
+    };
+
+    player.onplay = function () {
+      if (!remote) {
+        send("playback:state", {
+          playing: true,
+          time: player.currentTime,
+          url: u.href,
+          type: kind
+        });
+      }
+    };
+
+    player.onpause = function () {
+      if (!remote) {
+        send("playback:state", {
+          playing: false,
+          time: player.currentTime,
+          url: u.href,
+          type: kind
+        });
+      }
+    };
+
+    if (kind === "hls") {
+      if (window.Hls && window.Hls.isSupported()) {
+        hls = new window.Hls();
+        hls.loadSource(u.href);
+        hls.attachMedia(player);
+
+        hls.on(window.Hls.Events.ERROR, function (event, data) {
+          if (data && data.fatal) {
+            msg("HLS failed. Check stream validity and CORS.");
+          }
+        });
+      } else if (player.canPlayType("application/vnd.apple.mpegurl")) {
+        player.src = u.href;
+      } else {
+        msg("HLS is not supported in this browser.");
+        return;
+      }
+    } else if (kind === "dash") {
+      if (!window.dashjs) {
+        msg("DASH player library did not load.");
+        return;
+      }
+
+      dash = window.dashjs.MediaPlayer().create();
+      dash.initialize(player, u.href, false);
+      dash.on(window.dashjs.MediaPlayer.events.ERROR, function () {
+        msg("DASH playback failed. Check the stream and codecs.");
+      });
+    } else {
+      player.src = u.href;
+    }
+
+    msg("Loading " + kind + " media…");
+
+    if (!remote) send("media:load", { url: u.href, type: kind });
+  }
+
+  function currentTime() {
+    try {
+      if (yt) return yt.getCurrentTime();
+      if (video) return video.currentTime || 0;
+    } catch (e) {}
+
+    return 0;
+  }
+
+  function applyPlayback(state) {
+    if (!state) return;
+
+    var targetTime = Number(state.time) || 0;
+    var drift = Math.abs(currentTime() - targetTime);
+
+    if (yt) {
+      try {
+        if (drift > 2) yt.seekTo(targetTime, true);
+        if (state.playing) yt.playVideo();
+        else yt.pauseVideo();
+      } catch (e) {}
+      return;
+    }
+
+    if (video) {
+      if (drift > 2) {
+        try { video.currentTime = targetTime; } catch (e) {}
+      }
+
+      if (state.playing) {
+        var result = video.play();
+
+        if (result && result.catch) {
+          result.catch(function () {
+            msg("Tap Play in the video controls, then try Sync.");
+          });
+        }
+      } else {
+        video.pause();
+      }
+    }
+  }
+
+  function updateParticipants(list) {
+    if (!$("participants")) return;
+
+    $("participants").textContent = (list || []).map(function (person) {
+      return person.name + (person.isHost ? " · host" : "");
+    }).join(" · ") || "None";
+  }
+
+  function addChatMessage(message) {
+    var log = $("chatLog");
+    if (!log) return;
+
+    if (log.textContent === "Join a room to chat.") {
+      log.textContent = "";
+    }
+
+    var line = document.createElement("div");
+    line.textContent = (message.name || "Guest") + ": " + message.text;
+    log.appendChild(line);
+    log.scrollTop = log.scrollHeight;
+  }
+
+  function connect() {
+    if (!base()) {
+      connectionMsg("Backend URL missing in config.js");
+      return;
+    }
+
+    if (!window.io) {
+      connectionMsg("Socket.IO library failed to load");
+      return;
+    }
+
+    try {
+      socket = window.io(base());
+
+      socket.on("connect", function () {
+        connectionMsg("Connected");
+        if (room) {
+          socket.emit("room:join", {
+            room: room,
+            name: $("displayName") ? $("displayName").value : "Guest"
+          });
+        }
+      });
+
+      socket.on("disconnect", function () {
+        connectionMsg("Disconnected — reconnecting…");
+      });
+
+      socket.on("connect_error", function (error) {
+        connectionMsg("Backend connection failed");
+        console.error("RaveLite Socket.IO error:", error);
+      });
+
+      socket.on("room:error", function (data) {
+        roomMsg(data && data.message ? data.message : "Room error.");
+      });
+
+      socket.on("room:joined", function (data) {
+        room = data.room;
+        isHost = !!data.isHost;
+
+        if ($("roomCode")) $("roomCode").value = room;
+
+        roomMsg("Joined " + room + (isHost ? " as host" : ""));
+        updateParticipants(data.participants || []);
+
+        if (data.media && data.media.url) {
+          loadMedia(data.media.url, true);
+        }
+      });
+
+      socket.on("room:participants", updateParticipants);
+      socket.on("chat:message", addChatMessage);
+
+      socket.on("media:load", function (data) {
+        if (data && data.url) loadMedia(data.url, true);
+      });
+
+      socket.on("playback:state", applyPlayback);
+    } catch (error) {
+      connectionMsg("Connection setup failed");
+      console.error("RaveLite setup error:", error);
+    }
+  }
+
+  function createRoom() {
+    if (!socket || !socket.connected) {
+      roomMsg("Backend is not connected. Check config.js and Render.");
+      return;
+    }
+
+    socket.emit("room:create", {
+      name: $("displayName") ? $("displayName").value : "Guest"
+    });
+  }
+
+  function joinRoom() {
+    if (!socket || !socket.connected) {
+      roomMsg("Backend is not connected. Check config.js and Render.");
+      return;
+    }
+
+    socket.emit("room:join", {
+      room: $("roomCode").value.trim().toUpperCase(),
+      name: $("displayName") ? $("displayName").value : "Guest"
+    });
+  }
+
+  if ($("loadBtn")) {
+    $("loadBtn").onclick = function () {
+      loadMedia($("mediaUrl").value);
+    };
+  }
+
+  if ($("mediaUrl")) {
+    $("mediaUrl").onkeydown = function (event) {
+      if (event.key === "Enter") loadMedia(event.target.value);
+    };
+  }
+
+  if ($("openBtn")) {
+    $("openBtn").onclick = function () {
+      var u = validUrl($("mediaUrl").value);
+      if (u) window.open(u.href, "_blank", "noopener,noreferrer");
+    };
+  }
+
+  if ($("createBtn")) $("createBtn").onclick = createRoom;
+  if ($("joinBtn")) $("joinBtn").onclick = joinRoom;
+
+  if ($("leaveBtn")) {
+    $("leaveBtn").onclick = function () {
+      send("room:leave");
+      room = null;
+      roomMsg("Left room.");
+    };
+  }
+
+  if ($("copyBtn")) {
+    $("copyBtn").onclick = function () {
+      if (!room) {
+        roomMsg("Join a room first.");
+        return;
+      }
+
+      var invite = new URL(window.location.href);
+      invite.searchParams.set("room", room);
+
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(invite.href).then(function () {
+          roomMsg("Invite copied.");
+        }).catch(function () {
+          roomMsg(invite.href);
+        });
+      } else {
+        roomMsg(invite.href);
+      }
+    };
+  }
+
+  if ($("sendBtn")) {
+    $("sendBtn").onclick = function () {
+      var input = $("chatInput");
+      var text = input ? input.value.trim() : "";
+
+      if (text && room && socket && socket.connected) {
+        send("chat:send", { text: text });
+        input.value = "";
+      } else {
+        roomMsg("Join a connected room to chat.");
+      }
+    };
+  }
+
+  if ($("chatInput")) {
+    $("chatInput").onkeydown = function (event) {
+      if (event.key === "Enter" && $("sendBtn")) {
+        $("sendBtn").click();
+      }
+    };
+  }
+
+  if ($("playBtn")) {
+    $("playBtn").onclick = function () {
+      if (yt) {
+        yt.playVideo();
+      } else if (video) {
+        var result = video.play();
+        if (result && result.catch) {
+          result.catch(function () {
+            msg("Tap Play in the video controls.");
+          });
+        }
+      } else {
+        msg("Load a video first.");
+      }
+    };
+  }
+
+  if ($("pauseBtn")) {
+    $("pauseBtn").onclick = function () {
+      if (yt) yt.pauseVideo();
+      else if (video) video.pause();
+    };
+  }
+
+  if ($("syncBtn")) {
+    $("syncBtn").onclick = function () {
+      if (room && socket && socket.connected) {
+        send("playback:request");
+      } else {
+        msg("Join a connected room first.");
+      }
+    };
+  }
+
+  if ($("pipBtn")) {
+    $("pipBtn").onclick = function () {
+      if (video && document.pictureInPictureEnabled &&
+          video.requestPictureInPicture) {
+        video.requestPictureInPicture().catch(function () {
+          msg("Picture-in-picture is unavailable.");
+        });
+      } else {
+        msg("Picture-in-picture is not supported for this player.");
+      }
+    };
+  }
+
+  if ($("clearHistory")) {
+    $("clearHistory").onclick = function () {
+      historyList = [];
+      if ($("history")) $("history").textContent = "History cleared.";
+    };
+  }
+
+  if ($("convertBtn")) {
+    $("convertBtn").onclick = async function () {
+      var fileInput = $("uploadFile");
+      var file = fileInput && fileInput.files ? fileInput.files[0] : null;
+
+      if (!file) {
+        $("convertStatus").textContent = "Choose a file first.";
+        return;
+      }
+
+      if (!base()) {
+        $("convertStatus").textContent = "Backend URL missing in config.js.";
+        return;
+      }
+
+      var form = new FormData();
+      form.append("video", file);
+
+      $("convertStatus").textContent = "Uploading and converting…";
+
+      try {
+        var response = await fetch(base() + "/api/convert", {
+          method: "POST",
+          body: form
+        });
+
+        var data = await response.json();
+
+        if (!response.ok) {
+          throw new Error(data.error || "Conversion failed.");
+        }
+
+        loadMedia(data.url);
+        $("convertStatus").textContent =
+          "Conversion finished. Temporary output may expire.";
+      } catch (error) {
+        $("convertStatus").textContent =
+          "Conversion failed: " + error.message;
+      }
+    };
+  }
+
+  var params = new URLSearchParams(window.location.search);
+  var roomFromUrl = params.get("room");
+
+  if (roomFromUrl && $("roomCode")) {
+    $("roomCode").value = roomFromUrl;
+  }
+
+  connectionMsg("Starting connection…");
+  connect();
+})();ive preview";
 
       $("playerArea").append(f);
 
